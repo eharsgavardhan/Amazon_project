@@ -1,0 +1,156 @@
+pipeline {
+    agent any
+    
+    environment {
+        NODE_ENV = 'production'
+        REGISTRY = 'docker.io'
+        IMAGE_NAME = 'amazon-project'
+        DEPLOY_HOST = 'your-deploy-host'
+        DEPLOY_USER = 'deploy-user'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo '🔄 Checking out code...'
+                checkout scm
+            }
+        }
+        
+        stage('Install Dependencies') {
+            steps {
+                echo '📦 Installing dependencies...'
+                sh 'npm install'
+            }
+        }
+        
+        stage('Lint & Code Quality') {
+            steps {
+                echo '🔍 Running linter...'
+                sh 'npm run lint || true'
+            }
+        }
+        
+        stage('Unit Tests') {
+            steps {
+                echo '✅ Running unit tests...'
+                sh 'npm test'
+            }
+        }
+        
+        stage('Build Application') {
+            steps {
+                echo '🔨 Building application...'
+                sh 'npm run build || echo "No build script"'
+            }
+        }
+        
+        stage('Security Scan') {
+            steps {
+                echo '🔐 Running security checks...'
+                sh 'npm audit || true'
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                echo '🐳 Building Docker image...'
+                sh '''
+                    docker build -t ${REGISTRY}/${IMAGE_NAME}:${BUILD_NUMBER} .
+                    docker tag ${REGISTRY}/${IMAGE_NAME}:${BUILD_NUMBER} ${REGISTRY}/${IMAGE_NAME}:latest
+                '''
+            }
+        }
+        
+        stage('Push to Registry') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo '📤 Pushing image to registry...'
+                withCredentials([usernamePassword(credentialsId: 'docker-hub-credentials', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh '''
+                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
+                        docker push ${REGISTRY}/${IMAGE_NAME}:${BUILD_NUMBER}
+                        docker push ${REGISTRY}/${IMAGE_NAME}:latest
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy to Staging') {
+            when {
+                branch 'develop'
+            }
+            steps {
+                echo '🚀 Deploying to staging...'
+                sh '''
+                    ssh -i ~/.ssh/deploy_key ${DEPLOY_USER}@${DEPLOY_HOST} << 'EOF'
+                    cd /opt/amazon-project
+                    docker pull ${REGISTRY}/${IMAGE_NAME}:latest
+                    docker-compose -f docker-compose.staging.yml up -d
+                    docker-compose -f docker-compose.staging.yml logs
+                    EOF
+                '''
+            }
+        }
+        
+        stage('Smoke Tests') {
+            when {
+                branch 'develop'
+            }
+            steps {
+                echo '🔥 Running smoke tests...'
+                sh '''
+                    sleep 10
+                    curl -f http://staging-app:3000/health || exit 1
+                '''
+            }
+        }
+        
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo '🌍 Deploying to production...'
+                sh '''
+                    ssh -i ~/.ssh/deploy_key ${DEPLOY_USER}@${DEPLOY_HOST} << 'EOF'
+                    cd /opt/amazon-project
+                    docker pull ${REGISTRY}/${IMAGE_NAME}:${BUILD_NUMBER}
+                    docker-compose -f docker-compose.prod.yml up -d
+                    docker-compose -f docker-compose.prod.yml logs
+                    EOF
+                '''
+            }
+        }
+        
+        stage('Production Health Check') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo '💚 Verifying production deployment...'
+                sh '''
+                    sleep 10
+                    curl -f http://prod-app:3000/health || exit 1
+                '''
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo '🧹 Cleaning up...'
+            cleanWs()
+        }
+        success {
+            echo '✨ Pipeline succeeded!'
+            // Send success notification
+        }
+        failure {
+            echo '❌ Pipeline failed!'
+            // Send failure notification
+        }
+    }
+}
